@@ -3,14 +3,24 @@ import numpy as np
 import asyncio
 import socketio
 import json
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, VideoStreamTrack
+from aiortc import (
+    RTCPeerConnection, 
+    RTCSessionDescription, 
+    RTCIceCandidate,
+    RTCIceServer, 
+    RTCConfiguration,
+    RTCIceGatherer,
+    VideoStreamTrack
+)
 from aiortc.contrib.media import MediaPlayer
 
 sio = socketio.AsyncClient()
 
 pc = RTCPeerConnection()
 
-room_name = 'room1'
+ig = RTCIceGatherer()
+
+room_name = 'room2'
 
 pcs = set()
 pcs.add(pc)
@@ -23,13 +33,8 @@ async def connect():
         print('make_connection success')
     except Exception as e:
         print('make_connection error : ',e)
-    await sio.emit('join_room', 'room1')
+    await sio.emit('join_room', room_name)
     
-@sio.event
-async def message(data):
-    print('message received with ', data)
-
-
 @sio.event
 async def disconnect():
     print('disconnected from server')
@@ -37,38 +42,47 @@ async def disconnect():
 @sio.event   
 async def welcome():
     print('received welcome')
-    # await sio.emit('message', ('is it?!!!!!!!!!', room_name))
-    #my_data_channel = pc.createDataChannel("datachannel")
-    #print('my_data_channel : ',my_data_channel)
+    my_data_channel = pc.createDataChannel("chat")
+    print('my_data_channel : ',my_data_channel)
 
     offer = await pc.createOffer()
-    # print('created offer : ',offer)
+    print('created offer : ')
     
-    pc.setLocalDescription(offer) # ICE Candidate 때문에 await 제거했음 문제 생기면 다시 await 추가
-    # try:
-    #     pc.setLocalDescription(offer) # ICE Candidate 때문에 await 제거했음 문제 생기면 다시 await 추가
-    #     print('setLocalDescription(offer) success')
-    # except Exception as e:
-    #     print('setLocalDescription(offer) error')
+    try:
+        await pc.setLocalDescription(offer) # ICE Candidate 때문에 await 제거했음 문제 생기면 다시 await 추가
+        print('setLocalDescription(offer) success')
+    except Exception as e:
+        print('setLocalDescription(offer) error')
     
     offer_json = {"sdp": offer.sdp, "type": offer.type}
     
     # print("offer_json : ",offer_json)
     await sio.emit("offer", (offer_json, room_name))
     print('sent the offer')
-    
+
+
+
+
 @sio.event
 async def offer(offer):
-    print('received the offer')
+    print('received the offer :')
+    @pc.on('datachannel')
+    def on_datachannel(channel):
+        print('##########################')
+        @channel.on('message')
+        def on_message(message):
+            channel.send('hello im python')
+
+    # @pc.add_listener('datachannel', lambda channel: on_datachannel(channel))
+    
     # print("received offer : ", offer)
     rev_offer = RTCSessionDescription(offer['sdp'], offer['type'])
     # print("rev_ offer : ", rev_offer)
-    await pc.setRemoteDescription(rev_offer)
-    # try:
-    #     await pc.setRemoteDescription(rev_offer)
-    #     print('setRemoteDescription(offer) success!')
-    # except Exception as e:
-    #     print('setRemoteDescription(offer) error : ',e)
+    try:
+        await pc.setRemoteDescription(rev_offer)
+        print('setRemoteDescription(offer) success!')
+    except Exception as e:
+        print('setRemoteDescription(offer) error : ',e)
     
         
     try:
@@ -76,28 +90,36 @@ async def offer(offer):
         print('createAnswer success!')
     except Exception as e:
         print('createAnswer error : ',e)
-    answer = await pc.createAnswer()
-    # print('answer type : ',type(answer))
-    # print('answer : ',answer)
+
     await pc.setLocalDescription(answer)  # ICE Candidate 때문에 await 제거했음 문제 생기면 다시 await 추가
     answer_json = {"sdp": answer.sdp, "type": answer.type}
     await sio.emit("answer", (answer_json, room_name))
     print('sent the answer')
+    print('getLocalCandidates type : ',type(ig.getLocalCandidates()))
+    print('getLocalCandidates : ',ig.getLocalCandidates())
 
 @sio.on('answer')
 async def on_answer(answer):
-    print("received the answer")
+    print("received the answer :")
+    @pc.on('datachannel')
+    def on_datachannel(channel):
+        print('##########################')
+        @channel.on('message')
+        def on_message(message):
+            channel.send('hello im python')
     rev_answer = RTCSessionDescription(sdp=answer['sdp'], type=answer['type'])
     try:
         await pc.setRemoteDescription(rev_answer)  # ICE Candidate 때문에 await 제거했음 문제 생기면 다시 await 추가
         print('setRemoteDescription(answer) success!')
     except Exception as e:
         print('setRemoteDescription(answer) error : ',e)
+    print('getLocalCandidates type : ',type(RTCIceGatherer.getLocalCandidates()))
+    print('getLocalCandidates : ',RTCIceGatherer.getLocalCandidates())
 
 @sio.on('ice')
 async def on_ice(ice):
-    if ice:
-        print("received candidate")
+    if ice is not None:
+        print("received candidate: ", ice)
         candidate = ice['candidate'].replace("candidate:", "")
         splitted_data = candidate.split(" ")
 #rtc_candidate = RTCIceCandidate(candidate.get("component"),
@@ -127,35 +149,47 @@ async def on_ice(ice):
         await pc.addIceCandidate(rtc_candidate)
     
 def make_connection():
-    pc = RTCPeerConnection(
-        configuration={
-            "iceServers": [
-                {
-                    "urls": [
-                        "stun:stun.l.google.com:19302",
-                        "stun:stun1.l.google.com:19302",
-                        "stun:stun2.l.google.com:19302",
-                    ],
-                },
-            ],
-        }
-    )
+    global pc
+    ice_server = RTCIceServer(urls="stun:stun.l.google.com:19302")
+    pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=[ice_server]))
     pc.on("icecandidate", handle_ice)
     pc.on("addstream", handle_add_stream)
+    pc.on('icegatheringstatechange', on_icegatheringstatechange)
+    pc.on('iceconnectionstatechange', on_iceconnectionstatechange)
+    pc.on('connectionstatechange', on_connectionstatechange)
+    pc.on('signalingstatechange', on_signalingstatechange)
+    
+@pc.on('signalingstatechange')
+def on_signalingstatechange():
+    print("signalingState : ",pc.signalingState)
+    
+@pc.on('icegatheringstatechange')
+def on_icegatheringstatechange():
+    print("icegatheringstatechange : ",pc.iceGatheringState)
+    
+@pc.on('connectionstatechange')
+def on_iceconnectionstatechange():
+    print("connectionState : ",pc.connectionState)
+    
+@pc.on('iceconnectionstatechange')
+def on_connectionstatechange():
+    print("iceConnectionState : ",pc.iceConnectionState)
+
+
     
 @pc.on("icecandidate")
-async def handle_ice(candidate):
+def handle_ice(candidate):
     print("created candidate :", candidate)
     sio.emit("ice", candidate, room_name)
     print("sent candidate")
 
 @pc.on("addstream")
-async def handle_add_stream(stream):
+def handle_add_stream(stream):
     print("received addstream : ", stream)
 
 @pc.on("track")
 async def on_track(track):
-    print("received track : ",track)
+    print("received track : ",track.id)
     if track.kind == "video":
         print("received video")
         while True:
@@ -164,6 +198,7 @@ async def on_track(track):
             # convert frame to numpy array
             img = frame.to_ndarray(format="bgr24")
             # display image using cv2
+            
             cv2.imshow("Video", img)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
